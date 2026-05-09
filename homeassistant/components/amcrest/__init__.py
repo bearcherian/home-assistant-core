@@ -1,7 +1,7 @@
 """Support for Amcrest IP cameras."""
 
 import asyncio
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import AsyncGenerator, Callable, Coroutine
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -83,6 +83,8 @@ NOTIFICATION_ID = "amcrest_notification"
 NOTIFICATION_TITLE = "Amcrest Camera Setup"
 
 SCAN_INTERVAL = timedelta(seconds=10)
+
+MONITOR_THREAD_JOIN_TIMEOUT = 30.0
 
 AUTHENTICATION_LIST = {"basic": "basic"}
 
@@ -334,7 +336,11 @@ def _monitor_events(
     event_codes: set[str],
     stop_event: threading.Event | None = None,
 ) -> None:
-    """Monitor camera events. Exits when stop_event is set (config flow only)."""
+    """Monitor camera events.
+
+    When ``stop_event`` is set (config entries), the loop exits cooperatively.
+    YAML setups omit ``stop_event`` and run until Home Assistant stops.
+    """
     while stop_event is None or not stop_event.is_set():
         if stop_event:
             api.available_flag.wait(timeout=1.0)
@@ -368,16 +374,22 @@ def _start_event_monitor(
     api: AmcrestChecker,
     event_codes: set[str],
     stop_event: threading.Event | None = None,
-) -> threading.Event | None:
-    """Start event monitor. Returns stop_event when provided (for config flow)."""
+) -> threading.Thread:
+    """Start event monitor thread.
+
+    Config entries pass ``stop_event`` and register ``entry.async_on_unload`` to
+    ``thread.join`` via ``hass.async_add_executor_job`` after
+    ``async_unload_entry`` signals shutdown (see ``async_unload_entry``).
+    YAML setups omit ``stop_event`` and rely on a daemon thread for process lifetime.
+    """
     thread = threading.Thread(
         target=_monitor_events,
         name=f"Amcrest {name}",
         args=(hass, name, api, event_codes, stop_event),
-        daemon=stop_event is None,
+        daemon=True,
     )
     thread.start()
-    return stop_event
+    return thread
 
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
@@ -568,10 +580,28 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
     stop_event = threading.Event()
-    _start_event_monitor(hass, name, api, event_codes, stop_event)
+    monitor_thread = _start_event_monitor(hass, name, api, event_codes, stop_event)
 
     runtime_data = cast(AmcrestConfigEntryData, entry.runtime_data)
     runtime_data["stop_event"] = stop_event
+    runtime_data["event_monitor_thread"] = monitor_thread
+
+    def _async_join_event_monitor() -> Coroutine[Any, Any, None]:
+        async def _join() -> None:
+            def _join_with_timeout() -> None:
+                monitor_thread.join(timeout=MONITOR_THREAD_JOIN_TIMEOUT)
+                if monitor_thread.is_alive():
+                    _LOGGER.warning(
+                        "%s: event monitor thread did not exit within %s s after unload",
+                        name,
+                        MONITOR_THREAD_JOIN_TIMEOUT,
+                    )
+
+            await hass.async_add_executor_job(_join_with_timeout)
+
+        return _join()
+
+    entry.async_on_unload(_async_join_event_monitor)
     return True
 
 
@@ -589,6 +619,7 @@ class AmcrestConfigEntryData(TypedDict):
 
     device: AmcrestDevice
     stop_event: NotRequired[threading.Event]
+    event_monitor_thread: NotRequired[threading.Thread]
 
 
 @dataclass

@@ -14,6 +14,7 @@ from homeassistant.const import (
     CONF_PORT,
     CONF_USERNAME,
 )
+from homeassistant.core import HomeAssistant
 
 from tests.common import MockConfigEntry
 
@@ -23,6 +24,40 @@ TEST_USERNAME = "admin"
 TEST_PASSWORD = "password123"
 TEST_SERIAL = "12345"
 TEST_NAME = "Amcrest Camera"
+
+SERIAL_FROM_FLOW = "SERIAL_FROM_FLOW"
+
+
+@pytest.fixture
+def mock_amcrest_init_entry(hass: HomeAssistant) -> MockConfigEntry:
+    """Config entry used by several ``test_init`` cases (stable serial from flow)."""
+    entry = MockConfigEntry(
+        title=TEST_NAME,
+        domain=DOMAIN,
+        unique_id=SERIAL_FROM_FLOW,
+        data={
+            CONF_HOST: "1.2.3.4",
+            CONF_PORT: TEST_PORT,
+            CONF_USERNAME: TEST_USERNAME,
+            CONF_PASSWORD: TEST_PASSWORD,
+            CONF_NAME: TEST_NAME,
+        },
+    )
+    entry.add_to_hass(hass)
+    return entry
+
+
+@pytest.fixture
+def mock_amcrest_checker_serial_ok_api() -> MagicMock:
+    """``AmcrestChecker`` mock with a successful ``async_serial_number`` await."""
+    api = MagicMock()
+
+    async def _serial_ok() -> str:
+        return SERIAL_FROM_FLOW
+
+    api.async_serial_number = _serial_ok()
+    api.get_base_url.return_value = "http://1.2.3.4"
+    return api
 
 
 @pytest.fixture
